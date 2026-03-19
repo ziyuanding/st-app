@@ -33,5 +33,4 @@ go build -o st
 
 ### Partition Details (`./st -p <partition_name>`)
 
-<img width="2608" height="1632" alt="Gemini_Generated_Image_hsik6rhsik6rhsik" src="https://github.com/user-attachments/assets/a527de3b-232d-41d8-87d2-b93fdc9e6084" />
-
+<img width="2608" height="1632" alt="Gemini_Generated_Image_hsik6rhsik6rhsik" src="https://github.com/user-attachments/assets/9b4a51cd-a6e3-4057-9c09-dd020e1a944b" />
