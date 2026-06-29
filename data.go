@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"os/user"
 	"strconv"
 	"strings"
-	"os/user"
 )
 
 type Job struct {
@@ -43,7 +43,7 @@ func getGlobalSlurmData() GlobalData {
 	nodes := make(map[string]*Node)
 	cmdSinfo := "sinfo -a -N -h -o '%N|%R|%c|%G|%m'"
 	outSinfo, _ := exec.Command("bash", "-c", cmdSinfo).Output()
-	
+
 	for _, line := range strings.Split(strings.TrimSpace(string(outSinfo)), "\n") {
 		parts := strings.Split(line, "|")
 		if len(parts) >= 5 {
@@ -66,7 +66,9 @@ func getGlobalSlurmData() GlobalData {
 	cmdSqueue := "squeue -a -h -t R -o '%N|%u|%j|%C|%m|%b'"
 	outSqueue, _ := exec.Command("bash", "-c", cmdSqueue).Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(outSqueue)), "\n") {
-		if line == "" { continue }
+		if line == "" {
+			continue
+		}
 		parts := strings.Split(line, "|")
 		if len(parts) >= 6 {
 			allocNodelist := expandNodelist(parts[0])
@@ -74,7 +76,7 @@ func getGlobalSlurmData() GlobalData {
 			jobMemMB := parseJobMemToMB(parts[4])
 			jobGPUs := parseTRESForGPU(parts[5])
 
-			job := Job{User: parts[1], Name: parts[2], CPUs: jobCPUs}
+			job := Job{User: parts[1], Name: parts[2], CPUs: jobCPUs, MemGB: jobMemMB / 1024, GPUs: jobGPUs}
 
 			for _, allocNode := range allocNodelist {
 				for key, nodePtr := range nodes {
@@ -92,10 +94,35 @@ func getGlobalSlurmData() GlobalData {
 	return GlobalData{Nodes: nodes}
 }
 
+func getVisibleNodePartitions() map[string]bool {
+	out, err := exec.Command("scontrol", "show", "node").Output()
+	if err != nil {
+		return nil
+	}
+
+	partitions := make(map[string]bool)
+	for _, field := range strings.Fields(string(out)) {
+		if !strings.HasPrefix(field, "Partitions=") {
+			continue
+		}
+		value := strings.TrimPrefix(field, "Partitions=")
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(strings.TrimSuffix(part, "*"))
+			if part != "" && part != "(null)" {
+				partitions[part] = true
+			}
+		}
+	}
+	if len(partitions) == 0 {
+		return nil
+	}
+	return partitions
+}
+
 // 专门为 sq 视图抓取过去 24 小时的详细队列与历史信息 (基于 sacct)
 func getQueueData(showAll bool, targetUser string) []Job {
 	var jobs []Job
-	
+
 	// 1. 组装用户查询参数
 	userFlag := ""
 	if showAll {
@@ -113,18 +140,24 @@ func getQueueData(showAll bool, targetUser string) []Job {
 	// -S now-1days: 限制查询范围为过去 24 小时
 	cmdStr := fmt.Sprintf("sacct -X -n -P -S now-1days %s -o JobID,User,Partition,JobName,State,Elapsed,AllocCPUS,ReqMem,ReqTRES,NodeList,Start,End", userFlag)
 	out, err := exec.Command("bash", "-c", cmdStr).Output()
-	if err != nil { return jobs }
+	if err != nil {
+		return jobs
+	}
 
 	// 3. 解析输出
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" { continue }
+		if line == "" {
+			continue
+		}
 		p := strings.Split(line, "|")
 		if len(p) >= 12 {
 			cpu, _ := strconv.Atoi(p[6])
 			// 提取状态，sacct 返回的状态可能会带有 "CANCELLED by 1001"，只取第一个词
-			state := strings.Split(p[4], " ")[0] 
+			state := strings.Split(p[4], " ")[0]
 			nodeList := p[9]
-			if nodeList == "None" { nodeList = "(Pending/Unknown)" }
+			if nodeList == "None" {
+				nodeList = "(Pending/Unknown)"
+			}
 
 			jobs = append(jobs, Job{
 				ID: p[0], User: p[1], Part: p[2], Name: p[3], State: state, Elapsed: p[5],
