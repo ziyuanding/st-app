@@ -1,19 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
+	"time"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"golang.org/x/term"
 )
 
 func runSqMode(showAll bool, targetUser string) {
-	fmt.Println("正在从数据库拉取 24 小时内的任务记录...")
-	
+	interactive := term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stdin.Fd()))
+	if interactive {
+		fmt.Print("正在从数据库拉取 24 小时内的任务记录...")
+	} else {
+		fmt.Println("正在从数据库拉取 24 小时内的任务记录...")
+	}
+
 	// 把参数传给底层，让 sacct 替我们做过滤
 	filteredJobs := getQueueData(showAll, targetUser)
+	if interactive {
+		fmt.Print("\r\x1b[2K")
+	}
 
 	// 1. 确定展示的用户名称
 	displayUser := targetUser
@@ -40,28 +52,45 @@ func runSqMode(showAll bool, targetUser string) {
 		}
 	}
 
-	// 3. 渲染顶部仪表盘 (新增了成功和失败的统计)
-	dash := lipgloss.NewStyle().Bold(true).MarginBottom(1).Render(
-		fmt.Sprintf("📊 24小时任务总览 | 用户: %s | 运行: %d (占%d核) | 排队: %d | 完成: %d | 失败/取消: %d", 
-		displayUser, runCount, totalCPUs, pdCount, doneCount, failCount),
-	)
-	fmt.Println(dash)
+	render := func(width int) string {
+		return renderSqView(filteredJobs, displayUser, runCount, pdCount, doneCount, failCount, totalCPUs, width)
+	}
 
-	if len(filteredJobs) == 0 {
-		fmt.Println(StyleDim.Render("过去 24 小时内没有任何任务记录。"))
+	if !interactive {
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			width = 120
+		}
+		fmt.Print(render(width))
 		return
 	}
 
-	// 4. 终端宽度探测
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil { width = 120 }
+	runSqInteractive(render)
+}
+
+func renderSqView(filteredJobs []Job, displayUser string, runCount, pdCount, doneCount, failCount, totalCPUs, width int) string {
+	var b bytes.Buffer
+
+	dash := lipgloss.NewStyle().Bold(true).MarginBottom(1).Render(
+		fmt.Sprintf("📊 24小时任务总览 | 用户: %s | 运行: %d (占%d核) | 排队: %d | 完成: %d | 失败/取消: %d",
+			displayUser, runCount, totalCPUs, pdCount, doneCount, failCount),
+	)
+	fmt.Fprintln(&b, dash)
+
+	if len(filteredJobs) == 0 {
+		fmt.Fprintln(&b, StyleDim.Render("过去 24 小时内没有任何任务记录。"))
+		return b.String()
+	}
+
 	useFoldedView := width < 105
 
 	t := table.New().
 		Border(lipgloss.NormalBorder()).
 		BorderStyle(StyleDivider).
 		StyleFunc(func(row, col int) lipgloss.Style {
-			if row == 0 { return StyleHeader }
+			if row == 0 {
+				return StyleHeader
+			}
 			return lipgloss.NewStyle().Padding(0, 1)
 		})
 
@@ -111,5 +140,69 @@ func runSqMode(showAll bool, targetUser string) {
 		}
 	}
 
-	fmt.Println(t.Render())
+	fmt.Fprintln(&b, t.Render())
+	fmt.Fprintln(&b, StyleDim.Render("按 q 或 Ctrl+C 退出；调整终端宽度会自动切换布局。"))
+	return b.String()
+}
+
+func runSqInteractive(render func(width int) string) {
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		width, _, sizeErr := term.GetSize(int(os.Stdout.Fd()))
+		if sizeErr != nil {
+			width = 120
+		}
+		fmt.Print(render(width))
+		return
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	keyCh := make(chan byte, 1)
+	go func() {
+		var buf [1]byte
+		for {
+			n, err := os.Stdin.Read(buf[:])
+			if err != nil {
+				if err != io.EOF {
+					keyCh <- 3
+				}
+				return
+			}
+			if n > 0 {
+				keyCh <- buf[0]
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	fmt.Print("\x1b[?1049h\x1b[?25l")
+	defer fmt.Print("\x1b[?25h\x1b[?1049l")
+
+	currentWidth := 0
+	draw := func(force bool) {
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			width = 120
+		}
+		if !force && width == currentWidth {
+			return
+		}
+		currentWidth = width
+		fmt.Print("\x1b[H\x1b[2J")
+		fmt.Print(render(width))
+	}
+
+	draw(true)
+	for {
+		select {
+		case <-ticker.C:
+			draw(false)
+		case key := <-keyCh:
+			if key == 'q' || key == 'Q' || key == 3 {
+				return
+			}
+		}
+	}
 }
