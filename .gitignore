@@ -1,0 +1,8 @@
+# Local build outputs
+/st
+/st-app
+
+# Go test/build artifacts
+*.test
+*.prof
+coverage.out

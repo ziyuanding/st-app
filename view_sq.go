@@ -117,13 +117,19 @@ func renderSqView(data sqViewData, width, height, page int) sqRenderResult {
 	mode := sqRenderMode{compact: width < 155}
 	columns := selectSqColumns(data.jobs, width, mode)
 	colWidths := sqColumnWidths(data.jobs, columns, mode)
-	pageJobs, page, totalPages := sqPaginateJobs(data.jobs, height, page)
+	colWidths = expandSqNameColumn(data.jobs, columns, colWidths, mode, width)
+	jobGroups := sqJobChainGroups(data.jobs)
+	pageJobs, page, totalPages, pageStart := sqPaginateJobs(data.jobs, height, page)
 
 	fmt.Fprintln(&b, renderSqBorder(colWidths))
 	fmt.Fprintln(&b, renderSqHeader(columns, colWidths))
 	fmt.Fprintln(&b, renderSqBorder(colWidths))
-	for _, j := range pageJobs {
-		fmt.Fprintln(&b, renderSqRow(j, columns, colWidths, mode))
+	for i, j := range pageJobs {
+		groupID := 0
+		if pageStart+i < len(jobGroups) {
+			groupID = jobGroups[pageStart+i]
+		}
+		fmt.Fprintln(&b, renderSqRow(j, columns, colWidths, mode, sqRowBackground(groupID)))
 	}
 	fmt.Fprintln(&b, renderSqBorder(colWidths))
 
@@ -146,7 +152,7 @@ type sqColumn struct {
 	dropRank int
 	align    lipgloss.Position
 	value    func(Job, sqRenderMode) string
-	style    func(Job, string) string
+	style    func(Job, string, lipgloss.Style) string
 }
 
 func sqColumns(mode sqRenderMode) []sqColumn {
@@ -192,7 +198,7 @@ func sqJobIDNumber(id string) int64 {
 	return value
 }
 
-func sqPaginateJobs(jobs []Job, height, page int) ([]Job, int, int) {
+func sqPaginateJobs(jobs []Job, height, page int) ([]Job, int, int, int) {
 	rowsPerPage := len(jobs)
 	if height > 0 {
 		rowsPerPage = height - 7
@@ -217,7 +223,63 @@ func sqPaginateJobs(jobs []Job, height, page int) ([]Job, int, int) {
 	if end > len(jobs) {
 		end = len(jobs)
 	}
-	return jobs[start:end], page, totalPages
+	return jobs[start:end], page, totalPages, start
+}
+
+func sqJobChainGroups(jobs []Job) []int {
+	groups := make([]int, len(jobs))
+	groupID := 0
+	for i := range jobs {
+		if i > 0 && !sqJobsLinked(jobs[i-1], jobs[i]) {
+			groupID++
+		}
+		groups[i] = groupID
+	}
+	return groups
+}
+
+func sqJobsLinked(a, b Job) bool {
+	return sqDependencyReferences(a.Dependency, b.ID) ||
+		sqDependencyReferences(b.Dependency, a.ID)
+}
+
+func sqDependencyReferences(dep, jobID string) bool {
+	target := sqJobIDBase(jobID)
+	if target == "" || dep == "" {
+		return false
+	}
+
+	var b strings.Builder
+	flush := func() bool {
+		if b.Len() == 0 {
+			return false
+		}
+		value := b.String()
+		b.Reset()
+		return value == target
+	}
+
+	for _, r := range dep {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		if flush() {
+			return true
+		}
+	}
+	return flush()
+}
+
+func sqJobIDBase(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func selectSqColumns(jobs []Job, width int, mode sqRenderMode) []sqColumn {
@@ -259,6 +321,42 @@ func sqColumnWidths(jobs []Job, columns []sqColumn, mode sqRenderMode) []int {
 	return widths
 }
 
+func expandSqNameColumn(jobs []Job, columns []sqColumn, widths []int, mode sqRenderMode, maxTableWidth int) []int {
+	nameIdx := -1
+	for i, col := range columns {
+		if col.key == "name" {
+			nameIdx = i
+			break
+		}
+	}
+	if nameIdx == -1 {
+		return widths
+	}
+
+	available := maxTableWidth - sqTableWidth(widths)
+	if available <= 0 {
+		return widths
+	}
+
+	targetWidth := widths[nameIdx]
+	for _, job := range jobs {
+		if cellWidth := lipgloss.Width(columns[nameIdx].value(job, mode)); cellWidth > targetWidth {
+			targetWidth = cellWidth
+		}
+	}
+	if targetWidth <= widths[nameIdx] {
+		return widths
+	}
+
+	expanded := append([]int(nil), widths...)
+	extra := targetWidth - widths[nameIdx]
+	if extra > available {
+		extra = available
+	}
+	expanded[nameIdx] += extra
+	return expanded
+}
+
 func sqTableWidth(widths []int) int {
 	total := 1
 	for _, w := range widths {
@@ -288,20 +386,31 @@ func renderSqHeader(columns []sqColumn, widths []int) string {
 	return StyleHeader.Render(b.String())
 }
 
-func renderSqRow(job Job, columns []sqColumn, widths []int, mode sqRenderMode) string {
+func renderSqRow(job Job, columns []sqColumn, widths []int, mode sqRenderMode, rowStyle lipgloss.Style) string {
 	var b strings.Builder
-	b.WriteString("|")
+	b.WriteString(rowStyle.Render("|"))
 	for i, col := range columns {
 		raw := truncateDisplay(col.value(job, mode), widths[i])
 		cell := padDisplay(raw, widths[i], col.align)
+		b.WriteString(rowStyle.Render(" "))
 		if col.style != nil {
-			cell = col.style(job, cell)
+			b.WriteString(col.style(job, cell, rowStyle))
+		} else {
+			b.WriteString(rowStyle.Render(cell))
 		}
-		b.WriteString(" ")
-		b.WriteString(cell)
-		b.WriteString(" |")
+		b.WriteString(rowStyle.Render(" |"))
 	}
 	return b.String()
+}
+
+func sqRowBackground(groupID int) lipgloss.Style {
+	colors := []lipgloss.Color{
+		lipgloss.Color("235"),
+		lipgloss.Color("237"),
+		lipgloss.Color("236"),
+		lipgloss.Color("238"),
+	}
+	return lipgloss.NewStyle().Background(colors[groupID%len(colors)])
 }
 
 func sqStateShort(state string) string {
@@ -321,26 +430,26 @@ func sqStateShort(state string) string {
 	}
 }
 
-func sqStateStyle(job Job, text string) string {
+func sqStateStyle(job Job, text string, rowStyle lipgloss.Style) string {
 	switch job.State {
 	case "RUNNING":
-		return StyleBlue.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("#1890FF")).Render(text)
 	case "PENDING":
-		return StyleYellow.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("#FFFF00")).Render(text)
 	case "COMPLETED":
-		return StyleGreen.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("#00FF00")).Render(text)
 	case "FAILED", "NODE_FAIL", "TIMEOUT", "CANCELLED":
-		return StyleRed.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("#FF0000")).Render(text)
 	default:
-		return StyleDim.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("240")).Render(text)
 	}
 }
 
-func sqNodeStyle(job Job, text string) string {
+func sqNodeStyle(job Job, text string, rowStyle lipgloss.Style) string {
 	if job.State == "PENDING" {
-		return StyleItalic.Render(text)
+		return rowStyle.Foreground(lipgloss.Color("244")).Italic(true).Render(text)
 	}
-	return text
+	return rowStyle.Render(text)
 }
 
 func sqResources(job Job, mode sqRenderMode) string {

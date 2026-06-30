@@ -14,6 +14,7 @@ type Job struct {
 	Name         string
 	State        string
 	Part         string
+	Dependency   string
 	CPUs         int
 	MemGB        int
 	GPUs         int
@@ -134,17 +135,34 @@ func getQueueData(showAll bool, targetUser string) []Job {
 		}
 		userFlag = "-u " + targetUser // 只看指定用户（默认自己）
 	}
+	currentJobs := getCurrentQueueJobs(showAll, targetUser)
+	dependencies := make(map[string]string)
+	for _, job := range currentJobs {
+		if job.Dependency != "" {
+			dependencies[sqJobIDBase(job.ID)] = job.Dependency
+		}
+	}
+	for id, dependency := range getSubmitLineDependencies(userFlag) {
+		if dependency != "" {
+			dependencies[id] = dependency
+		}
+	}
 
 	// 2. 调用 sacct
 	// -X: 隐藏多余的 job step (如 .batch)，只看主任务
 	// -S now-1days: 限制查询范围为过去 24 小时
-	cmdStr := fmt.Sprintf("sacct -X -n -P -S now-1days %s -o JobID,User,Partition,JobName,State,Elapsed,AllocCPUS,ReqMem,ReqTRES,NodeList,Start,End", userFlag)
+	cmdStr := fmt.Sprintf("sacct -X -n -P -S now-1days %s -o JobID,User,Partition,JobName,State,Elapsed,AllocCPUS,ReqMem,ReqTRES,NodeList,Start,End,Dependency", userFlag)
 	out, err := exec.Command("bash", "-c", cmdStr).Output()
 	if err != nil {
-		return jobs
+		cmdStr = fmt.Sprintf("sacct -X -n -P -S now-1days %s -o JobID,User,Partition,JobName,State,Elapsed,AllocCPUS,ReqMem,ReqTRES,NodeList,Start,End", userFlag)
+		out, err = exec.Command("bash", "-c", cmdStr).Output()
+		if err != nil {
+			return currentJobs
+		}
 	}
 
 	// 3. 解析输出
+	seen := make(map[string]bool)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -158,13 +176,113 @@ func getQueueData(showAll bool, targetUser string) []Job {
 			if nodeList == "None" {
 				nodeList = "(Pending/Unknown)"
 			}
+			dependency := ""
+			if len(p) >= 13 {
+				dependency = formatDependency(p[12])
+			}
+			if dependency == "" {
+				dependency = dependencies[sqJobIDBase(p[0])]
+			}
 
 			jobs = append(jobs, Job{
 				ID: p[0], User: p[1], Part: p[2], Name: p[3], State: state, Elapsed: p[5],
 				CPUs: cpu, MemGB: parseJobMemToMB(p[7]) / 1024, GPUs: parseTRESForGPU(p[8]),
-				NodeOrReason: nodeList, Start: p[10], End: p[11],
+				NodeOrReason: nodeList, Start: p[10], End: p[11], Dependency: dependency,
 			})
+			seen[sqJobIDBase(p[0])] = true
 		}
+	}
+	for _, job := range currentJobs {
+		if !seen[sqJobIDBase(job.ID)] {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
+}
+
+func getSubmitLineDependencies(userFlag string) map[string]string {
+	dependencies := make(map[string]string)
+	cmdStr := fmt.Sprintf("sacct -X -n -P -S now-1days %s -o JobID,SubmitLine%%1500", userFlag)
+	out, err := exec.Command("bash", "-c", cmdStr).Output()
+	if err != nil {
+		return dependencies
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		p := strings.SplitN(line, "|", 2)
+		if len(p) != 2 {
+			continue
+		}
+		dependency := parseDependencyFromSubmitLine(p[1])
+		if dependency != "" {
+			dependencies[sqJobIDBase(p[0])] = dependency
+		}
+	}
+	return dependencies
+}
+
+func parseDependencyFromSubmitLine(submitLine string) string {
+	fields := strings.Fields(submitLine)
+	for i, field := range fields {
+		if strings.HasPrefix(field, "--dependency=") {
+			return formatDependency(strings.TrimPrefix(field, "--dependency="))
+		}
+		if field == "--dependency" && i+1 < len(fields) {
+			return formatDependency(fields[i+1])
+		}
+	}
+	return ""
+}
+
+func getCurrentQueueJobs(showAll bool, targetUser string) []Job {
+	var jobs []Job
+	userFlag := ""
+	if !showAll {
+		userFlag = "-u " + targetUser
+	}
+
+	cmdStr := fmt.Sprintf("squeue -a -h %s -o '%%i|%%u|%%P|%%j|%%T|%%M|%%C|%%m|%%b|%%N|%%S|%%E|%%R'", userFlag)
+	out, err := exec.Command("bash", "-c", cmdStr).Output()
+	if err != nil {
+		return jobs
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		p := strings.Split(line, "|")
+		if len(p) < 13 {
+			continue
+		}
+		cpu, _ := strconv.Atoi(p[6])
+		nodeOrReason := p[9]
+		if nodeOrReason == "" || nodeOrReason == "N/A" {
+			nodeOrReason = p[12]
+		}
+		start := p[10]
+		if start == "" || start == "N/A" {
+			start = "Unknown"
+		}
+
+		jobs = append(jobs, Job{
+			ID:           p[0],
+			User:         p[1],
+			Part:         p[2],
+			Name:         p[3],
+			State:        p[4],
+			Elapsed:      p[5],
+			CPUs:         cpu,
+			MemGB:        parseJobMemToMB(p[7]) / 1024,
+			GPUs:         parseTRESForGPU(p[8]),
+			NodeOrReason: nodeOrReason,
+			Start:        start,
+			End:          "Unknown",
+			Dependency:   formatDependency(p[11]),
+		})
 	}
 	return jobs
 }
