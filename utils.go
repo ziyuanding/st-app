@@ -17,6 +17,7 @@ var (
 	StyleLspPartTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).MarginBottom(1)
 	// sq 视图专属颜色
 	StyleGreen   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	StyleBlue    = lipgloss.NewStyle().Foreground(lipgloss.Color("#1890FF"))
 	StyleYellow  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
 	StyleRed    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")) // 新增红色，用于失败/取消的任务
 	StyleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))

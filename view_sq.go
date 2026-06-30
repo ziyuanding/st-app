@@ -324,11 +324,11 @@ func sqStateShort(state string) string {
 func sqStateStyle(job Job, text string) string {
 	switch job.State {
 	case "RUNNING":
-		return StyleGreen.Render(text)
+		return StyleBlue.Render(text)
 	case "PENDING":
 		return StyleYellow.Render(text)
 	case "COMPLETED":
-		return StyleDim.Render(text)
+		return StyleGreen.Render(text)
 	case "FAILED", "NODE_FAIL", "TIMEOUT", "CANCELLED":
 		return StyleRed.Render(text)
 	default:
